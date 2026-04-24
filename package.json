@@ -1,0 +1,24 @@
+{
+  "name": "@buildrbp/http-client",
+  "version": "1.0.0",
+  "description": "Custom Axios HTTP client with interceptors, abort control, token refresh, retry, caching, deduplication and more",
+  "main": "dist/index.js",
+  "types": "dist/index.d.ts",
+  "type": "module",
+  "scripts": {
+    "build": "tsc",
+    "dev": "tsc --watch",
+    "test": "vitest"
+  },
+  "keywords": ["axios", "http", "client", "typescript", "interceptor", "abort", "retry", "cache"],
+  "author": "",
+  "license": "MIT",
+  "dependencies": {
+    "axios": "^1.9.0"
+  },
+  "devDependencies": {
+    "@types/node": "^22.15.3",
+    "typescript": "^5.8.3",
+    "vitest": "^3.1.2"
+  }
+}
