@@ -9,12 +9,17 @@
  *   user_name  → userName  (standard)
  *   USER_NAME  → userName  (screaming snake)
  *   USER_ID    → userId
+ *
+ * Lưu ý: số sau dấu _ cũng được xử lý đúng:
+ *   page_1_count   → page1Count
+ *   HTTP_200_OK    → http200Ok
  */
 export function toCamelCase(str: string): string {
   // Detect SCREAMING_SNAKE_CASE: toàn chữ hoa + có dấu _
   const isScreaming = /^[A-Z][A-Z0-9_]*$/.test(str) && str.includes('_');
   const normalized = isScreaming ? str.toLowerCase() : str;
-  return normalized.replace(/_([a-z])/g, (_, char) => char.toUpperCase());
+  // Match _ theo sau bởi chữ thường [a-z] HOẶC số [0-9] → loại bỏ _ và capitalize/giữ chữ
+  return normalized.replace(/_([a-z0-9])/g, (_, char) => char.toUpperCase());
 }
 
 /** camelCase → snake_case
@@ -35,7 +40,11 @@ export function toSnakeCase(str: string): string {
 type PlainObject = Record<string, unknown>;
 
 function isPlainObject(value: unknown): value is PlainObject {
-  return typeof value === 'object' && value !== null && !Array.isArray(value);
+  if (typeof value !== 'object' || value === null || Array.isArray(value)) return false;
+  // Kiểm tra prototype chain: chỉ accept plain objects (Object.create(null) hoặc {})
+  // Loại bỏ Date, Map, Set, RegExp, v.v. — chúng có prototype riêng
+  const proto = Object.getPrototypeOf(value) as unknown;
+  return proto === Object.prototype || proto === null;
 }
 
 function transformKeysDeep(

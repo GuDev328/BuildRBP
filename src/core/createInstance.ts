@@ -131,8 +131,15 @@ export function createApiClient(clientConfig: ApiClientConfig): ApiClient {
     clearCache(keyOrPattern?: string | RegExp): void {
       if (!keyOrPattern) {
         cache.clear();
-      } else {
+      } else if (keyOrPattern instanceof RegExp) {
+        // RegExp: truyền thẳng vào invalidateByPattern
         cache.invalidateByPattern(keyOrPattern);
+      } else {
+        // string URL (vd: '/users') → match URL field trong JSON cache key format:
+        //   '["get","/users","",""]'  ← URL nằm ở field thứ 2 trong JSON array
+        // Escape special regex chars trước khi build pattern
+        const escaped = keyOrPattern.replace(/[.*+?^${}()|[\]\\]/g, '\\$&');
+        cache.invalidateByPattern(new RegExp(`,"${escaped}`));
       }
     },
 

@@ -326,10 +326,16 @@ await api.get("/app-config", { cacheTtl: 10 * 60_000 }); // cache 10 phút
 await api.get("/users", { skipCache: true });
 
 // Xóa cache
-api.clearCache(); // xóa tất cả
-api.clearCache(/\/users/); // xóa tất cả keys chứa /users (RegExp)
-api.clearCache("get-users"); // xóa keys bắt đầu bằng prefix này
+api.clearCache();              // xóa tất cả
+api.clearCache("/users");      // xóa entries có URL chứa "/users" (string path)
+api.clearCache(/\/users\/\d+/); // xóa entries match RegExp (vd: /users/123, /users/456)
 ```
+
+> **Cách `clearCache` hoạt động với string:**  
+> Khi truyền string URL (vd: `"/users"`), lib tự động build regex match URL field trong
+> cache key JSON. Điều này đảm bảo `clearCache("/users")` chỉ xóa đúng `/users`,
+> không xóa nhầm `/users-admin` hay entries không liên quan.  
+> Khi truyền `RegExp`, pattern được dùng trực tiếp trên cache key string.
 
 **Stale-While-Revalidate:** Khi TTL hết hạn, trả về data cũ (stale) ngay lập tức
 đồng thời gọi revalidate ngầm ở background. Caller không bị block chờ.
@@ -361,7 +367,12 @@ data.firstName; // ✅
 // SERVER trả: { USER_ID: 1, USER_NAME: "Alice" }
 // Frontend nhận: { userId: 1, userName: "Alice" }
 
+// Hỗ trợ số trong key
+// SERVER trả: { page_1_count: 10, http_200_ok: true }
+// Frontend nhận: { page1Count: 10, http200Ok: true }
+
 // Hỗ trợ đệ quy — objects và arrays lồng nhau đều được transform
+// Date, Map, Set và các built-in objects được giữ nguyên (không bị phá vỡ)
 ```
 
 ---
@@ -693,14 +704,32 @@ src/
 
 tests/
 ├── core/
-│   └── AbortManager.test.ts
+│   ├── AbortManager.test.ts
+│   └── AbortManager.advanced.test.ts
 ├── features/
 │   ├── cache.test.ts
+│   ├── cache.advanced.test.ts
 │   ├── deduplicator.test.ts
-│   └── retryHandler.test.ts
-└── utils/
-    ├── buildRequestKey.test.ts
-    └── transformKeys.test.ts
+│   ├── deduplicator.advanced.test.ts
+│   ├── retryHandler.test.ts
+│   ├── retryHandler.advanced.test.ts
+│   ├── mockAdapter.test.ts
+│   └── uploadDownload.test.ts
+├── utils/
+│   ├── buildRequestKey.test.ts
+│   ├── buildRequestKey.advanced.test.ts
+│   ├── transformKeys.test.ts
+│   ├── transformKeys.advanced.test.ts
+│   └── logger.test.ts
+├── integration/
+│   └── createInstance.test.ts
+└── issues/               # Edge cases & regression tests cho các bugs đã fix
+    ├── mockAdapter.urlMatching.test.ts
+    ├── clearCache.stringPattern.test.ts
+    ├── transformKeys.edge.test.ts
+    ├── cache.multiInstance.test.ts
+    ├── retryAndKey.edge.test.ts
+    └── additionalEdgeCases.test.ts
 ```
 
 ---
@@ -713,7 +742,7 @@ npm run build         # compile TypeScript → dist/
 npm run dev           # watch mode
 ```
 
-**Kết quả:** 65 tests / 6 files — 100% pass ✅
+**Kết quả:** 440 tests / 24 files — 100% pass ✅
 
 ---
 

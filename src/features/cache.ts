@@ -134,15 +134,20 @@ export class ResponseCache {
     }
   }
 
-  // ── Axios Wrap ────────────────────────────────────────────────────────────
+  // ── Axios Wrap ──────────────────────────────────────────────
 
-  private _wrapped = false;
+  /**
+   * Track từng axios instance đã wrap — WeakSet thư giún không cần cleanup.
+   * Dùng WeakSet thay vì boolean _wrapped để cho phép cùng 1 ResponseCache
+   * wrap nhiều axios instances khác nhau mà không bị idempotent guard chặn nhau.
+   */
+  private _wrappedInstances = new WeakSet<object>();
 
   wrap(axiosInstance: AxiosInstance): void {
     if (!this.options.enabled) return;
-    // Idempotent guard — tránh wrap nhiều lần (hot reload, test setup)
-    if (this._wrapped) return;
-    this._wrapped = true;
+    // Idempotent guard per-instance — tránh wrap cùng instance nhiều lần (hot reload, test setup)
+    if (this._wrappedInstances.has(axiosInstance)) return;
+    this._wrappedInstances.add(axiosInstance);
 
     const cache = this;
     const originalRequest = axiosInstance.request.bind(axiosInstance);
