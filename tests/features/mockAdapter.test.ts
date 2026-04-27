@@ -78,12 +78,16 @@ describe('mockAdapter', () => {
       expect(res.data).toEqual({ id: 42 });
     });
 
-    it('match URL bằng startsWith (prefix)', async () => {
+    it('match URL bằng exact match (không sub-path)', async () => {
       const instance = makeInstance([
         { method: 'get', url: '/api/v1', response: { version: '1' }, status: 200 },
       ]);
-      const res = await instance.get('/api/v1/users');
-      expect(res.data).toEqual({ version: '1' });
+      // Exact match works
+      const res1 = await instance.get('/api/v1');
+      expect(res1.data).toEqual({ version: '1' });
+
+      // /api/v1/users should NOT match /api/v1 (no sub-path matching without trailing /)
+      await expect(instance.get('/api/v1/users')).rejects.toBeDefined();
     });
   });
 

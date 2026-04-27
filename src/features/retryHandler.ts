@@ -12,6 +12,7 @@ const DEFAULT_RETRY_OPTIONS: Required<RetryOptions> = {
   maxRetries: 3,
   retryDelay: 300,
   retryOn: [429, 500, 502, 503, 504],
+  maxDelay: 10_000, // Cap exponential backoff at 10s
 };
 
 function sleep(ms: number): Promise<void> {
@@ -53,8 +54,8 @@ export function setupRetryInterceptor(
 
       config._retryCount = retryCount + 1;
 
-      // Exponential backoff
-      const delay = opts.retryDelay * Math.pow(2, retryCount);
+      // Exponential backoff với cap
+      const delay = Math.min(opts.retryDelay * Math.pow(2, retryCount), opts.maxDelay);
       await sleep(delay);
 
       // Đặt lại signal vì AbortController cũ đã bị consumed.

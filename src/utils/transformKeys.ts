@@ -51,6 +51,9 @@ function transformKeysDeep(
   obj: unknown,
   transformer: (key: string) => string
 ): unknown {
+  if (obj === null || obj === undefined) {
+    return obj;
+  }
   if (Array.isArray(obj)) {
     return obj.map((item) => transformKeysDeep(item, transformer));
   }
@@ -60,6 +63,15 @@ function transformKeysDeep(
       result[transformer(key)] = transformKeysDeep(value, transformer);
     }
     return result;
+  }
+  // Preserve special object types that should not be transformed or stringified
+  if (obj instanceof Date) return obj;
+  if (obj instanceof RegExp) return obj;
+  if (obj instanceof Map) {
+    return new Map([...obj].map(([k, v]) => [k, transformKeysDeep(v, transformer)]));
+  }
+  if (obj instanceof Set) {
+    return new Set([...obj].map((v) => transformKeysDeep(v, transformer)));
   }
   return obj;
 }

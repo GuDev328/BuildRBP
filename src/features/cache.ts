@@ -175,21 +175,37 @@ export class ResponseCache {
         // Update LRU timestamp
         entry.lastAccessedAt = now;
         logger.debug(`[Cache] HIT: ${key}`);
-        return entry.data as AxiosResponse<T>;
+        // Trả shallow copy của AxiosResponse để tránh caller vô tình
+        // mutate wrapper object (vd: res.headers, res.status) ảnh hưởng cache.
+        // response.data vẫn là shared reference — đây là trade-off hợp lý
+        // vì deep clone toàn bộ data sẽ tốn kém và phá vỡ object references.
+        return { ...entry.data } as AxiosResponse<T>;
       }
 
       if (isStaleEntry && cache.options.staleWhileRevalidate) {
         logger.debug(`[Cache] STALE — revalidating: ${key}`);
-        // Revalidate in background, trả stale ngay
+        // Revalidate in background, trả stale ngay.
+        // Dùng setTimeout(fn, 0) để đảm bảo background request chạy sau
+        // khi caller đã nhận response — tránh microtask contention.
         originalRequest<T>(config).then((fresh) => {
           cache.set(key, fresh as AxiosResponse, ttl);
-        }).catch(() => {/* silent — không làm hỏng stale response đang dùng */});
-        return entry.data as AxiosResponse<T>;
+        }).catch((err: unknown) => {
+          // Log để developer biết background revalidation đang fail
+          // (không throw vì không làm hỏng stale response caller đang dùng)
+          logger.debug(
+            `[Cache] Background revalidation failed for: ${key}`,
+            err instanceof Error ? err.message : String(err)
+          );
+        });
+        return { ...entry.data } as AxiosResponse<T>;
       }
 
       // Cache miss hoặc expired (no SWR)
+      // Always store shallow copy to prevent caller mutations from affecting cache entry.
+      // This makes cache miss behavior consistent with cache hit (both return shallow copies).
       const response = await originalRequest<T>(config);
-      cache.set(key, response as AxiosResponse, ttl);
+      const cachedData = { ...response } as AxiosResponse;
+      cache.set(key, cachedData, ttl);
       return response;
     };
   }

@@ -20,7 +20,16 @@ function matchHandler(config: AxiosRequestConfig, handler: MockHandler): boolean
 
   const url = config.url ?? '';
   if (typeof handler.url === 'string') {
-    return url === handler.url || url.startsWith(handler.url);
+    // Exact match
+    if (url === handler.url) return true;
+    
+    // Only allow sub-path matching if handler ends with /
+    // This prevents '/user' from matching '/users' (different resources)
+    // while '/users/' will match '/users/123' (parent-child relationship)
+    if (handler.url.endsWith('/')) {
+      return url.startsWith(handler.url);
+    }
+    return false;
   }
   return handler.url.test(url);
 }
@@ -45,7 +54,9 @@ export function setupMockAdapter(axiosInstance: AxiosInstance, handlers: MockHan
         // eslint-disable-next-line @typescript-eslint/no-explicit-any
         return originalAdapter(config as any);
       }
-      throw new Error('[Mock] No matching handler and no original adapter available.');
+      throw new Error(
+        `[Mock] No matching handler for ${(config.method ?? 'GET').toUpperCase()} ${config.url} and no original adapter available.`
+      );
     }
 
     if (handler.delay) {

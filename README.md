@@ -339,6 +339,16 @@ api.clearCache(/\/users\/\d+/); // xóa entries match RegExp (vd: /users/123, /u
 
 **Stale-While-Revalidate:** Khi TTL hết hạn, trả về data cũ (stale) ngay lập tức
 đồng thời gọi revalidate ngầm ở background. Caller không bị block chờ.
+Nếu background revalidation thất bại, lỗi được log ở debug level (không throw) —
+ theo dõi trong DevTools bằng `[Cache] Background revalidation failed`.
+
+**Cache Isolation (Shallow Copy):** Mỗi lần trả về từ cache, response object được
+shallow-copy để caller không vô tình mutate wrapper fields (`status`, `headers`, v.v.)
+ảnh hưởng đến cache entry cho các callers tiếp theo.
+
+> **Lưu ý:** `response.data` vẫn là shared reference vì sào chép sâu (deep clone)
+toàn bộ payload tốn kém và phá vỡ object identity (instanceof checks). Tránh
+mutate trực tiếp `response.data.someField` khi dùng cache.
 
 **LRU Eviction:** Khi số entries đạt `maxSize`, entry được truy cập ít nhất gần đây
 sẽ bị xóa tự động — tránh memory leak trong long-running SPA.
@@ -742,7 +752,7 @@ npm run build         # compile TypeScript → dist/
 npm run dev           # watch mode
 ```
 
-**Kết quả:** 440 tests / 24 files — 100% pass ✅
+**Kết quả:** 447 tests / 24 files — 100% pass ✅
 
 ---
 

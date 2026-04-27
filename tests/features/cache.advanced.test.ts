@@ -317,7 +317,7 @@ describe('ResponseCache — advanced', () => {
       expect(callCount).toBe(2); // đã gửi thêm 1 request background
     });
 
-    it('background revalidation fail silently — không affect caller', async () => {
+    it('background revalidation fail — không affect caller (có log debug)', async () => {
       let callCount = 0;
       const { instance } = makeWrappedInstance({ ttl: 20, staleWhileRevalidate: true });
       instance.defaults.adapter = async (config: any) => {
@@ -332,7 +332,7 @@ describe('ResponseCache — advanced', () => {
       await instance.request({ method: 'get', url: '/swr' });
       await new Promise((r) => setTimeout(r, 30)); // expire
 
-      // Lần 2: nhận stale — background fail silently
+      // Lần 2: nhận stale — background fail được log debug nhưng không throw lên caller
       const res = await instance.request({ method: 'get', url: '/swr' });
       expect(res).toBeDefined(); // không throw
       expect(res.data).toEqual({ ok: true });
@@ -428,6 +428,109 @@ describe('ResponseCache — advanced', () => {
       expect(cache.get('old')).not.toBeNull();   // vừa được access
       expect(cache.get('third')).not.toBeNull();  // mới nhất
       expect(cache.get('new')).toBeNull();        // bị evict
+    });
+  });
+
+  // ── Cache HIT trả shallow copy — không phải same reference ────────────────
+
+  describe('cache HIT — shallow copy isolation', () => {
+    it('cache HIT trả object khác với stored entry (shallow copy)', async () => {
+      let callCount = 0;
+      const { instance } = makeWrappedInstance({ ttl: 60_000 });
+      instance.defaults.adapter = async (config: any) => {
+        callCount++;
+        return { data: { items: [1, 2, 3] }, status: 200, statusText: 'OK', headers: {}, config };
+      };
+
+      const r1 = await instance.request({ method: 'get', url: '/data' });
+      const r2 = await instance.request({ method: 'get', url: '/data' }); // cache hit
+
+      expect(callCount).toBe(1);
+      // r2 là shallow copy — không phải cùng object reference với r1
+      expect(r2).not.toBe(r1);
+      // Nhưng nội dung data vẫn giống nhau
+      expect(r2.data).toEqual(r1.data);
+    });
+
+    it('caller mutate response wrapper không làm hỏng cache entry tiếp theo', async () => {
+      let callCount = 0;
+      const { instance } = makeWrappedInstance({ ttl: 60_000 });
+      instance.defaults.adapter = async (config: any) => {
+        callCount++;
+        return { data: { items: [1, 2, 3] }, status: 200, statusText: 'OK', headers: {}, config };
+      };
+
+      const r1 = await instance.request({ method: 'get', url: '/data' });
+
+      // Mutate wrapper object của r1 (shallow copy — thay đổi property trên wrapper)
+      (r1 as any).status = 999;
+      (r1 as any).statusText = 'Mutated';
+
+      // Lần 2: cache hit → shallow copy mới, wrapper của cache không bị ảnh hưởng
+      const r2 = await instance.request({ method: 'get', url: '/data' });
+
+      expect(callCount).toBe(1); // vẫn 1 HTTP call
+      expect(r2.status).toBe(200);       // cache entry không bị mutate
+      expect(r2.statusText).toBe('OK');
+    });
+
+    it('cache STALE (SWR) cũng trả shallow copy', async () => {
+      let callCount = 0;
+      const { instance } = makeWrappedInstance({ ttl: 20, staleWhileRevalidate: true });
+      instance.defaults.adapter = async (config: any) => {
+        callCount++;
+        return { data: { v: callCount }, status: 200, statusText: 'OK', headers: {}, config };
+      };
+
+      const r1 = await instance.request({ method: 'get', url: '/swr-copy' });
+      await new Promise((r) => setTimeout(r, 30)); // TTL expired
+
+      // Lần 2: trả stale → shallow copy
+      const r2 = await instance.request({ method: 'get', url: '/swr-copy' });
+
+      // r2 là shallow copy của cache entry, không phải r1
+      expect(r2).not.toBe(r1);
+      expect(r2.data).toEqual(r1.data); // cùng stale data
+
+      await new Promise((r) => setTimeout(r, 30)); // chờ background
+    });
+  });
+
+  // ── SWR revalidation logging khi fail ─────────────────────────────────────
+
+  describe('staleWhileRevalidate — background revalidation logging', () => {
+    it('background revalidation fail được log ở debug level', async () => {
+      const debugSpy = vi.spyOn(logger, 'debug');
+      logger.enabled = true; // bật logger để capture
+
+      let callCount = 0;
+      const { instance } = makeWrappedInstance({ ttl: 20, staleWhileRevalidate: true });
+      instance.defaults.adapter = async (config: any) => {
+        callCount++;
+        if (callCount === 2) {
+          throw new Error('Network timeout');
+        }
+        return { data: { ok: true }, status: 200, statusText: 'OK', headers: {}, config };
+      };
+
+      // Warm cache
+      await instance.request({ method: 'get', url: '/fail-revalidate' });
+      await new Promise((r) => setTimeout(r, 30)); // expire
+
+      // Lần 2: stale + trigger background revalidation (sẽ fail)
+      const res = await instance.request({ method: 'get', url: '/fail-revalidate' });
+      expect(res).toBeDefined(); // không throw
+
+      // Chờ background settle và log ghi ra
+      await new Promise((r) => setTimeout(r, 30));
+
+      // Phải có log về revalidation failure (không bị silent nữa)
+      const failLogs = debugSpy.mock.calls.filter((args) =>
+        typeof args[0] === 'string' && args[0].includes('Background revalidation failed')
+      );
+      expect(failLogs.length).toBeGreaterThan(0);
+      // Log message phải chứa error info
+      expect(failLogs[0][1]).toContain('Network timeout');
     });
   });
 });

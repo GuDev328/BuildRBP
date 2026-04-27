@@ -36,36 +36,43 @@ describe('mockAdapter — URL matching edge cases', () => {
     });
   });
 
-  // ── startsWith behavior (current implementation) ──────────────────────────
+  // ── Segment-based matching (fixed behavior) ──────────────────────────────────
 
-  describe('startsWith behavior — documented behavior', () => {
+  describe('segment-based matching (proper path prefix)', () => {
     /**
-     * DOCUMENTED BUG: handler { url: '/user' } cũng match '/users'
-     * vì implementation dùng: url === handler.url || url.startsWith(handler.url)
+     * FIXED: handler { url: '/user' } KHÔNG còn match '/users'
+     * vì implementation mới chỉ dùng exact match hoặc sub-path với trailing slash.
      *
-     * Test này document behavior HIỆN TẠI (không phải expected behavior tốt nhất).
-     * Nếu fix bug → test này sẽ fail và cần cập nhật.
+     * Test này document behavior MỚI (correct behavior).
      */
-    it('[CURRENT BEHAVIOR] /user handler match cả /users do startsWith', async () => {
+    it('[FIXED] /user handler KHÔNG match /users (no sub-path)', async () => {
       const instance = axios.create();
       setupMockAdapter(instance, [
         { method: 'get', url: '/user', response: { matched: 'user-handler' }, status: 200 },
       ]);
 
-      // Với current implementation, /users sẽ match /user handler (startsWith)
-      const res = await instance.get('/users');
-      // Behavior hiện tại: match do startsWith → trả dữ liệu của handler /user
-      expect(res.data).toEqual({ matched: 'user-handler' });
+      // Với new implementation, /users sẽ KHÔNG match /user handler (exact match only)
+      await expect(instance.get('/users')).rejects.toBeDefined();
     });
 
-    it('[CURRENT BEHAVIOR] /api handler match cả /api/users', async () => {
+    it('[FIXED] /api handler KHÔNG match /api/users (no sub-path)', async () => {
       const instance = axios.create();
       setupMockAdapter(instance, [
         { method: 'get', url: '/api', response: { scope: 'api' }, status: 200 },
       ]);
 
-      const res = await instance.get('/api/users');
-      expect(res.data).toEqual({ scope: 'api' });
+      await expect(instance.get('/api/users')).rejects.toBeDefined();
+    });
+
+    it('/users/ sub-path match với trailing slash', async () => {
+      const instance = axios.create();
+      setupMockAdapter(instance, [
+        { method: 'get', url: '/users/', response: { all: true }, status: 200 },
+      ]);
+
+      // Handler với trailing slash match sub-paths
+      const res = await instance.get('/users/123');
+      expect(res.data).toEqual({ all: true });
     });
   });
 
@@ -93,7 +100,6 @@ describe('mockAdapter — URL matching edge cases', () => {
   describe('method matching', () => {
     it('GET handler không match POST request', async () => {
       const instance = axios.create();
-      // Handler chỉ GET
       setupMockAdapter(instance, [
         { method: 'get', url: '/users', response: [], status: 200 },
       ]);
@@ -101,6 +107,26 @@ describe('mockAdapter — URL matching edge cases', () => {
       // POST sẽ fallthrough sang original adapter → có thể throw network error
       // trong test environment (không có server thật)
       await expect(instance.post('/users', {})).rejects.toBeDefined();
+    });
+
+    it('GET handler không match PUT request', async () => {
+      const instance = axios.create();
+      setupMockAdapter(instance, [
+        { method: 'get', url: '/users', response: [], status: 200 },
+      ]);
+
+      // PUT sẽ fallthrough → network error
+      await expect(instance.put('/users', {})).rejects.toBeDefined();
+    });
+
+    it('GET handler không match DELETE request', async () => {
+      const instance = axios.create();
+      setupMockAdapter(instance, [
+        { method: 'get', url: '/users', response: [], status: 200 },
+      ]);
+
+      // DELETE sẽ fallthrough → network error
+      await expect(instance.delete('/users')).rejects.toBeDefined();
     });
 
     it('POST handler match đúng POST request', async () => {

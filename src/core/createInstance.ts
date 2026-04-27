@@ -40,17 +40,18 @@ export function createApiClient(clientConfig: ApiClientConfig): ApiClient {
   // ── 2. AbortManager ───────────────────────────────────────────────────────
   const abortManager = new AbortManager();
 
-  // ── 3. Cache & Dedup wraps ────────────────────────────────────────────────
-  // Wrap TRƯỚC interceptors để là outermost layer của request flow.
-  // Cache → Dedup → HTTP (thứ tự check: cache trước, nếu miss thì dedup)
-  const cache = new ResponseCache(clientConfig.cache);
-  if (clientConfig.cache?.enabled) {
-    cache.wrap(instance);
-  }
-
+  // ── 3. Dedup & Cache wraps ────────────────────────────────────────────────
+  // Wrap order important — outermost wraps check FIRST in the request flow:
+  //   Dedup (outermost) → Cache (inner) → HTTP
+  // Deduplicator runs first to abort duplicate requests before they hit the cache.
   const deduplicator = new Deduplicator();
   if (clientConfig.deduplication !== false) {
     deduplicator.wrap(instance);
+  }
+
+  const cache = new ResponseCache(clientConfig.cache);
+  if (clientConfig.cache?.enabled) {
+    cache.wrap(instance);
   }
 
   // ── 4. Request interceptors ───────────────────────────────────────────────
@@ -144,7 +145,18 @@ export function createApiClient(clientConfig: ApiClientConfig): ApiClient {
     },
 
     fork(overrides: Partial<ApiClientConfig> = {}): ApiClient {
-      return createApiClient({ ...clientConfig, ...overrides });
+      // Deep clone mutable config references to prevent shared state
+      const forkedConfig: ApiClientConfig = {
+        ...clientConfig,
+        ...overrides,
+        // Clone nested mutable objects
+        defaultHeaders: { ...clientConfig.defaultHeaders, ...overrides.defaultHeaders },
+        retry: clientConfig.retry ? { ...clientConfig.retry, ...overrides.retry } : overrides.retry,
+        cache: clientConfig.cache ? { ...clientConfig.cache, ...overrides.cache } : overrides.cache,
+        tokenRefresh: clientConfig.tokenRefresh ? { ...clientConfig.tokenRefresh } : overrides.tokenRefresh,
+        mocks: overrides.mocks ?? clientConfig.mocks,
+      };
+      return createApiClient(forkedConfig);
     },
   };
 

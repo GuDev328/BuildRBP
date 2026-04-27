@@ -37,6 +37,8 @@ export interface RetryOptions {
   retryDelay?: number;
   /** HTTP status codes sẽ được retry (default: [429, 500, 502, 503, 504]) */
   retryOn?: number[];
+  /** Delay tối đa tính bằng ms cho exponential backoff (default: 10_000) */
+  maxDelay?: number;
 }
 
 export interface CacheOptions {

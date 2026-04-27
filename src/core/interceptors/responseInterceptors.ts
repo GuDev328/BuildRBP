@@ -53,13 +53,24 @@ export function setupResponseInterceptors(
       }
 
       // 3. Transform response keys: snake_case → camelCase
+      // Skip for non-JSON response types (blob, arraybuffer, document)
+      const skipTransform =
+        response.config.responseType !== undefined &&
+        response.config.responseType !== 'json';
+
       let responseData = response.data;
-      if (config.transformKeys && responseData) {
+      if (config.transformKeys && !skipTransform && responseData) {
         responseData = keysToCamelCase(responseData);
       }
 
       // 4. Bóc tách envelope { data, message, status }
+      // Skip envelope unwrap cho non-JSON types (blob, arraybuffer...)
+      const skipEnvelope =
+        response.config.responseType !== undefined &&
+        response.config.responseType !== 'json';
+
       const isEnvelope =
+        !skipEnvelope &&
         responseData !== null &&
         typeof responseData === 'object' &&
         'data' in responseData &&
