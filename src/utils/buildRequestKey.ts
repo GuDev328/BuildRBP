@@ -1,9 +1,17 @@
 import type { AxiosRequestConfig } from 'axios';
 
-/**
- * Tạo unique string key từ method + url + params + data
- * Dùng cho: AbortManager, Deduplicator, Cache
- */
+let _binaryCounter = 0;
+
+function isBinaryData(data: unknown): boolean {
+  return (
+    (typeof FormData !== 'undefined' && data instanceof FormData) ||
+    (typeof Blob !== 'undefined' && data instanceof Blob) ||
+    (typeof ArrayBuffer !== 'undefined' && data instanceof ArrayBuffer) ||
+    (typeof File !== 'undefined' && data instanceof File) ||
+    ArrayBuffer.isView(data)
+  );
+}
+
 export function buildRequestKey(config: AxiosRequestConfig): string {
   const method = (config.method ?? 'get').toLowerCase();
   const url = config.url ?? '';
@@ -11,7 +19,7 @@ export function buildRequestKey(config: AxiosRequestConfig): string {
   let paramsStr = '';
   if (config.params) {
     try {
-      // Sort keys để đảm bảo { a:1, b:2 } và { b:2, a:1 } cùng key
+      // Stable ordering keeps equivalent param objects on the same key.
       const sorted = Object.fromEntries(
         Object.entries(config.params as Record<string, unknown>).sort(([a], [b]) =>
           a.localeCompare(b)
@@ -25,10 +33,15 @@ export function buildRequestKey(config: AxiosRequestConfig): string {
 
   let dataStr = '';
   if (config.data && method !== 'get') {
-    try {
-      dataStr = typeof config.data === 'string' ? config.data : JSON.stringify(config.data);
-    } catch {
-      dataStr = String(config.data);
+    // Binary payloads stringify to `{}`, so each request gets a unique key.
+    if (isBinaryData(config.data)) {
+      dataStr = `__binary_${++_binaryCounter}__`;
+    } else {
+      try {
+        dataStr = typeof config.data === 'string' ? config.data : JSON.stringify(config.data);
+      } catch {
+        dataStr = String(config.data);
+      }
     }
   }
 

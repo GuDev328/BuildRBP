@@ -1,7 +1,7 @@
 # @buildrbp/http-client
 
-> **Custom Axios HTTP Client** — TypeScript-first, production-ready, enterprise-grade.
-> Xây dựng trên Axios với đầy đủ tính năng: token refresh tự động, abort controller, retry, deduplication, cache LRU, upload/download progress và mock adapter.
+> **Custom Axios HTTP Client** — TypeScript-first, production-ready, optimized for React Query.
+> Xây dựng trên Axios với các tính năng: token refresh tự động, abort controller, upload/download progress, key transformation và mock adapter.
 
 ---
 
@@ -12,9 +12,7 @@
 | 🎯 **Typed API**          | Full TypeScript generics — `api.get<User[]>("/users")`                 |
 | 🔑 **Auto Token Refresh** | Tự động refresh `401`, queue requests, retry sau khi có token mới      |
 | 🚫 **Abort Controller**   | Hủy request theo `key` hoặc hủy tất cả, auto-cancel duplicate request  |
-| 🔁 **Auto Retry**         | Exponential backoff cho `5xx` và network error, không retry abort      |
-| 🔂 **Deduplication**      | Không gửi trùng GET đang pending — trả về cùng 1 Promise              |
-| 💾 **Response Cache**     | In-memory, TTL, stale-while-revalidate, LRU eviction                   |
+| 🪝 **Lifecycle Hooks**    | `beforeRequest`, `afterResponse`, `onError` — inject custom logic      |
 | 🔄 **Key Transform**      | Auto `camelCase ↔ snake_case` và `SCREAMING_SNAKE_CASE` cho mọi object |
 | 📤 **Upload Progress**    | Track tiến trình upload với callback `(percent, event)`                |
 | 📥 **Download Progress**  | Track tiến trình + auto trigger browser download                       |
@@ -105,23 +103,7 @@ const api = createApiClient({
     },
   },
 
-  // ── Retry ─────────────────────────────────────────────────────────────────
-  retry: {
-    maxRetries: 3, // số lần retry tối đa, default: 3
-    retryDelay: 300, // delay ban đầu (ms), tăng theo 2^n, default: 300
-    retryOn: [429, 500, 502, 503, 504], // status codes sẽ retry, default như này
-  },
-
-  // ── Cache ─────────────────────────────────────────────────────────────────
-  cache: {
-    enabled: true,
-    ttl: 60_000, // thời gian cache tồn tại (ms), default: 60_000
-    staleWhileRevalidate: true, // trả stale ngay + revalidate ngầm
-    maxSize: 100, // số entries tối đa trước khi LRU evict, default: 100
-  },
-
   // ── Các tùy chọn khác ─────────────────────────────────────────────────────
-  deduplication: true, // chống gửi GET trùng khi đang pending, default: true
   transformKeys: true, // tự động camelCase↔snake_case, default: false
   logging: true, // log request/response ở dev, tắt tự động ở production
 });
@@ -174,13 +156,6 @@ interface RequestOptions {
   // ── Abort ────────────────────────────────────────────────────────────────
   abortKey?: string; // key để abort request sau, tự generate nếu không truyền
 
-  // ── Cache ────────────────────────────────────────────────────────────────
-  cacheTtl?: number; // override TTL cache cho request này (ms)
-  skipCache?: boolean; // bỏ qua cache, luôn fetch mới
-
-  // ── Deduplication ────────────────────────────────────────────────────────
-  skipDedup?: boolean; // bỏ qua dedup, cho phép gửi trùng
-
   // ── Progress (dùng với upload/download) ──────────────────────────────────
   onUploadProgress?: (percent: number, event: AxiosProgressEvent) => void;
   onDownloadProgress?: (percent: number, event: AxiosProgressEvent) => void;
@@ -209,7 +184,7 @@ Khi server trả `401 Unauthorized`:
 ```typescript
 // Chỉ cần config một lần khi tạo instance — xử lý tự động hoàn toàn
 const { data } = await api.get<Profile>("/me");
-// Nếu token hết hạn → tự refresh → retry → trả về data bình thường
+// → Nếu token hết hạn: refresh → retry → trả về data bình thường
 ```
 
 ---
@@ -247,111 +222,6 @@ useEffect(() => {
   return () => api.abort("users-page"); // cleanup khi unmount
 }, []);
 ```
-
----
-
-## 🔁 Auto Retry
-
-Tự động retry khi gặp **network error** hoặc **HTTP status nằm trong `retryOn`**.
-Không retry khi request bị **abort chủ động** (`ERR_CANCELED`).
-
-**Exponential backoff:** `delay = retryDelay × 2^attempt`
-
-| Attempt   | Delay (retryDelay=300ms) |
-| --------- | ------------------------ |
-| 1st retry | 300ms                    |
-| 2nd retry | 600ms                    |
-| 3rd retry | 1200ms                   |
-
-```typescript
-// Tắt retry hoàn toàn
-const api = createApiClient({
-  baseURL: "https://api.example.com",
-  retry: { maxRetries: 0 },
-});
-
-// Chỉ retry network error, không retry 5xx
-const api = createApiClient({
-  baseURL: "https://api.example.com",
-  retry: { maxRetries: 2, retryOn: [] }, // retryOn rỗng = chỉ retry network error
-});
-```
-
----
-
-## 🔂 Deduplication
-
-Nếu cùng một GET request được gọi **khi request đó đang pending** → tất cả callers nhận chung **1 Promise**, không gửi HTTP request mới.
-
-```typescript
-// Cả 3 calls này chỉ tạo ra 1 HTTP request duy nhất
-const [r1, r2, r3] = await Promise.all([
-  api.get("/config"),
-  api.get("/config"),
-  api.get("/config"),
-]);
-// r1, r2, r3 đều có cùng data
-
-// Bỏ qua dedup (vd: force refresh)
-await api.get("/config", { skipDedup: true });
-```
-
-> **Lưu ý:** Dedup chỉ áp dụng cho GET requests đang **pending**. Nếu request đầu đã xong, request tiếp theo sẽ gửi HTTP mới bình thường.
-
----
-
-## 💾 Response Cache
-
-Cache chỉ áp dụng cho **GET requests**.
-
-```typescript
-const api = createApiClient({
-  baseURL: "https://api.example.com",
-  cache: {
-    enabled: true,
-    ttl: 60_000, // 1 phút
-    staleWhileRevalidate: true,
-    maxSize: 100,
-  },
-});
-
-// Cache key có dạng: JSON.stringify([method, url, paramsStr, dataStr])
-// Ví dụ: '["get","/users","",""]'
-//        '["get","/users","{\"page\":1}",""]'
-
-// Override TTL cho request cụ thể
-await api.get("/app-config", { cacheTtl: 10 * 60_000 }); // cache 10 phút
-
-// Bỏ qua cache, luôn fetch fresh
-await api.get("/users", { skipCache: true });
-
-// Xóa cache
-api.clearCache();              // xóa tất cả
-api.clearCache("/users");      // xóa entries có URL chứa "/users" (string path)
-api.clearCache(/\/users\/\d+/); // xóa entries match RegExp (vd: /users/123, /users/456)
-```
-
-> **Cách `clearCache` hoạt động với string:**  
-> Khi truyền string URL (vd: `"/users"`), lib tự động build regex match URL field trong
-> cache key JSON. Điều này đảm bảo `clearCache("/users")` chỉ xóa đúng `/users`,
-> không xóa nhầm `/users-admin` hay entries không liên quan.  
-> Khi truyền `RegExp`, pattern được dùng trực tiếp trên cache key string.
-
-**Stale-While-Revalidate:** Khi TTL hết hạn, trả về data cũ (stale) ngay lập tức
-đồng thời gọi revalidate ngầm ở background. Caller không bị block chờ.
-Nếu background revalidation thất bại, lỗi được log ở debug level (không throw) —
- theo dõi trong DevTools bằng `[Cache] Background revalidation failed`.
-
-**Cache Isolation (Shallow Copy):** Mỗi lần trả về từ cache, response object được
-shallow-copy để caller không vô tình mutate wrapper fields (`status`, `headers`, v.v.)
-ảnh hưởng đến cache entry cho các callers tiếp theo.
-
-> **Lưu ý:** `response.data` vẫn là shared reference vì sào chép sâu (deep clone)
-toàn bộ payload tốn kém và phá vỡ object identity (instanceof checks). Tránh
-mutate trực tiếp `response.data.someField` khi dùng cache.
-
-**LRU Eviction:** Khi số entries đạt `maxSize`, entry được truy cập ít nhất gần đây
-sẽ bị xóa tự động — tránh memory leak trong long-running SPA.
 
 ---
 
@@ -441,6 +311,124 @@ await api.download("/exports/data.csv", {
 });
 // Nếu không truyền downloadFileName, dùng Content-Disposition header từ server
 // Fallback: "download"
+```
+
+---
+
+## 🪝 Lifecycle Hooks
+
+Hooks cho phép inject custom logic vào request/response flow mà không cần fork instance hay monkey-patch axios.
+
+```typescript
+import { createApiClient } from "./src";
+
+const api = createApiClient({
+  baseURL: "https://api.example.com",
+  hooks: {
+    // Chạy TRƯỚC khi request gửi đi (sau khi token đã inject)
+    beforeRequest: [
+      async (ctx) => {
+        // ctx.method, ctx.url, ctx.params, ctx.body, ctx.headers
+        ctx.headers["x-app-id"] = "my-app";
+        ctx.headers["x-timestamp"] = Date.now().toString();
+      },
+    ],
+
+    // Chạy SAU khi response thành công (sau normalize + key transform)
+    afterResponse: [
+      async (ctx) => {
+        // ctx.data, ctx.message, ctx.status, ctx.method, ctx.url
+        analytics.track("api_success", {
+          url: ctx.url,
+          status: ctx.status,
+          duration: Date.now(),
+        });
+      },
+    ],
+
+    // Chạy khi request fail (không chạy cho abort)
+    onError: [
+      async (error) => {
+        // error.message, error.status, error.code, error.details, error.originalError
+        Sentry.captureException(error.originalError, {
+          tags: { endpoint: error.details },
+        });
+      },
+    ],
+  },
+});
+```
+
+### Execution Order
+
+```
+caller
+  │
+  ▼
+beforeRequest hooks (tuần tự)
+  │  → Có thể modify headers
+  │  → Throw để cancel request
+  ▼
+[Auth, Transform, AbortController, Logging]
+  │
+  ▼
+HTTP Request
+  │
+  ├── Success ──► [Transform keys, Unwrap envelope]
+  │                    │
+  │                    ▼
+  │              afterResponse hooks (tuần tự)
+  │                    │  → Nhận data đã normalize
+  │                    │  → Throw để trigger error
+  │                    ▼
+  │               return ApiResponse<T>
+  │
+  └── Error ──► onError hooks (tuần tự)
+                     │  → Nhận ApiError object
+                     │  → Throw để replace error
+                     ▼
+                 throw ApiError
+```
+
+### Key Behaviors
+
+| Hook | Khi nào chạy | Có thể modify | Throw |
+|------|-------------|--------------|-------|
+| `beforeRequest` | Trước HTTP, sau auth inject | Headers | Cancel request |
+| `afterResponse` | Sau normalize, trước caller | - | Chuyển thành error |
+| `onError` | Khi fail (trừ abort) | - | Replace error |
+
+> **Abort không trigger onError** — Abort là hành động chủ động của user, không phải lỗi cần track.
+
+### Multiple Hooks
+
+```typescript
+hooks: {
+  beforeRequest: [
+    // Chạy theo thứ tự: hook1 → hook2 → hook3
+    (ctx) => { ctx.headers["x-source"] = "web"; },
+    async (ctx) => { await logRequest(ctx); },
+    (ctx) => { ctx.headers["x-session"] = getSessionId(); },
+  ],
+}
+```
+
+### Fork & Hooks
+
+```typescript
+const base = createApiClient({
+  baseURL: "https://api.example.com",
+  hooks: {
+    beforeRequest: [addAppId],
+    onError: [logToSentry],
+  },
+});
+
+// Child kế thừa hooks từ parent
+const child = base.fork({ timeout: 30_000 });
+
+// Override hooks hoàn toàn (không merge)
+const noHooks = base.fork({ hooks: {} });
 ```
 
 ---
@@ -540,7 +528,7 @@ const testApi = api.fork({
 });
 ```
 
-> **Lưu ý quan trọng:** Mỗi forked instance có `AbortManager` và `ResponseCache` riêng biệt.
+> **Lưu ý quan trọng:** Mỗi forked instance có `AbortManager` riêng biệt.
 > `api.abortAll()` trên instance gốc **không hủy** requests của forked instance.
 
 ---
@@ -606,8 +594,6 @@ Tắt hoàn toàn ở production — không cần cấu hình gì thêm.
 [HTTP] ✔ 200 POST /auth/login (142ms)
 [HTTP] ✖ 401 GET /me (38ms)
 [HTTP] ⚠ [Mock] GET /users → 200
-[HTTP] ◦ [Cache] HIT: ["get","/users","",""]
-[HTTP] ◦ [Dedup] Reusing pending request: ["get","/config","",""]
 ```
 
 Tắt logging cho một instance cụ thể:
@@ -625,17 +611,6 @@ const api = createApiClient({ baseURL: "...", logging: false });
 api.get("/users")
     │
     ▼
-[Cache wrap]
-  ├── HIT (fresh) ──────────────────────────────────────────► return cached
-  ├── STALE + SWR ──────────────────────────────────────────► return stale + revalidate ngầm
-  └── MISS → tiếp tục
-    │
-    ▼
-[Deduplicator wrap]
-  ├── PENDING (cùng key) ──────────────────────────────────► join existing promise
-  └── NEW → tiếp tục
-    │
-    ▼
 [Request Interceptors]
   ├── Ghi timestamp _startTime
   ├── Inject x-request-id, x-trace-id
@@ -647,40 +622,22 @@ api.get("/users")
     HTTP Request (hoặc Mock Adapter nếu có handler match)
     │
     ▼
-[Response Interceptors — NGƯỢC thứ tự đăng ký]
-
-  1. [Retry Interceptor] ← chạy TRƯỚC khi có lỗi
-  │   ├── ERR_CANCELED / AbortError → không retry, pass up
-  │   ├── Network error / retryOn status → exponential backoff → retry
-  │   └── Khác → pass up
-  │
-  2. [Response Interceptor] ← chạy SAU
-      ├── Success:
-      │   ├── Cleanup AbortController
-      │   ├── Log response
-      │   ├── Transform keys (snake_case → camelCase)
-      │   └── Unwrap envelope { data, message, status }
-      └── Error:
-          ├── Cleanup AbortController
-          ├── Log error
-          ├── ERR_CANCELED → ApiError { code: "ABORTED" }
-          ├── 401 → refresh token → retry (hoặc onRefreshFailed nếu fail)
-          └── Khác → build ApiError và reject
+[Response Interceptor]
+  ├── Success:
+  │   ├── Cleanup AbortController
+  │   ├── Log response
+  │   ├── Transform keys (snake_case → camelCase)
+  │   └── Unwrap envelope { data, message, status }
+  └── Error:
+      ├── Cleanup AbortController
+      ├── Log error
+      ├── ERR_CANCELED → ApiError { code: "ABORTED" }
+      ├── 401 → refresh token → retry (hoặc onRefreshFailed nếu fail)
+      └── Khác → build ApiError và reject
     │
     ▼
 return ApiResponse<T> = { data: T, message: string, status: number }
 ```
-
-### Thứ tự đăng ký Interceptors (quan trọng)
-
-Axios chạy **response error handlers theo thứ tự ngược** với lúc đăng ký:
-
-| Thứ tự đăng ký          | Error handler chạy thứ |
-| ----------------------- | ---------------------- |
-| 1. Response interceptor | 2nd                    |
-| 2. Retry interceptor    | **1st** ← trước tiên  |
-
-Retry phải đăng ký **sau** response interceptor để Axios chạy retry **trước** — catch lỗi gốc trước khi response interceptor transform nó thành `ApiError`.
 
 ---
 
@@ -696,9 +653,6 @@ src/
 │       └── responseInterceptors.ts  # Normalize, envelope unwrap, 401/token refresh
 │
 ├── features/
-│   ├── retryHandler.ts              # Auto retry + exponential backoff
-│   ├── deduplicator.ts              # Chống duplicate GET requests
-│   ├── cache.ts                     # In-memory cache + TTL + LRU + SWR
 │   ├── uploadDownload.ts            # Upload/Download với progress tracking
 │   └── mockAdapter.ts               # Custom axios adapter cho mock
 │
@@ -711,35 +665,6 @@ src/
 │   └── index.ts                     # Tất cả TypeScript interfaces
 │
 └── index.ts                         # Public API entry point
-
-tests/
-├── core/
-│   ├── AbortManager.test.ts
-│   └── AbortManager.advanced.test.ts
-├── features/
-│   ├── cache.test.ts
-│   ├── cache.advanced.test.ts
-│   ├── deduplicator.test.ts
-│   ├── deduplicator.advanced.test.ts
-│   ├── retryHandler.test.ts
-│   ├── retryHandler.advanced.test.ts
-│   ├── mockAdapter.test.ts
-│   └── uploadDownload.test.ts
-├── utils/
-│   ├── buildRequestKey.test.ts
-│   ├── buildRequestKey.advanced.test.ts
-│   ├── transformKeys.test.ts
-│   ├── transformKeys.advanced.test.ts
-│   └── logger.test.ts
-├── integration/
-│   └── createInstance.test.ts
-└── issues/               # Edge cases & regression tests cho các bugs đã fix
-    ├── mockAdapter.urlMatching.test.ts
-    ├── clearCache.stringPattern.test.ts
-    ├── transformKeys.edge.test.ts
-    ├── cache.multiInstance.test.ts
-    ├── retryAndKey.edge.test.ts
-    └── additionalEdgeCases.test.ts
 ```
 
 ---
@@ -752,7 +677,7 @@ npm run build         # compile TypeScript → dist/
 npm run dev           # watch mode
 ```
 
-**Kết quả:** 447 tests / 24 files — 100% pass ✅
+**Kết quả:** 298 tests / 14 files — 100% pass ✅
 
 ---
 
@@ -777,12 +702,81 @@ import type {
   ApiResponse,
   ApiError,
   RequestOptions,
-  RetryOptions,
-  CacheOptions,
   TokenRefreshConfig,
   MockHandler,
+  HooksConfig,
+  RequestContext,
+  ResponseContext,
   AxiosInstance,
   AxiosRequestConfig,
   AxiosResponse,
 } from "./src";
 ```
+
+---
+
+## 🎯 Tại sao không có Cache / Retry / Deduplication?
+
+Library này được thiết kế để dùng với **React Query** (TanStack Query), vì vậy các tính năng sau được xử lý bởi React Query:
+
+- **Cache**: React Query có `staleTime`, `cacheTime`, `refetchOnMount`, `refetchOnWindowFocus`
+- **Retry**: React Query có `retry`, `retryDelay` config
+- **Deduplication**: React Query tự động deduplicate theo `queryKey`
+
+Điều này giúp:
+- ✅ Tránh conflict giữa 2 layer cache
+- ✅ Dễ debug hơn (chỉ 1 source of truth)
+- ✅ Giảm bundle size
+- ✅ Tận dụng tối đa React Query features (UI integration, optimistic updates, etc.)
+
+**Ví dụ sử dụng với React Query:**
+
+```typescript
+import { useQuery, useMutation, useQueryClient } from '@tanstack/react-query';
+import { createApiClient } from './src';
+
+const api = createApiClient({
+  baseURL: 'https://api.example.com',
+  tokenRefresh: { ... },
+  transformKeys: true,
+});
+
+// Query
+function UserList() {
+  const { data, isLoading } = useQuery({
+    queryKey: ['users'],
+    queryFn: () => api.get<User[]>('/users').then(res => res.data),
+    staleTime: 60_000, // cache 60s
+    retry: 3, // retry 3 lần
+  });
+
+  if (isLoading) return <div>Loading...</div>;
+  return <ul>{data?.map(user => <li key={user.id}>{user.firstName}</li>)}</ul>;
+}
+
+// Mutation
+function CreateUser() {
+  const queryClient = useQueryClient();
+  
+  const mutation = useMutation({
+    mutationFn: (newUser: CreateUserDto) => 
+      api.post<User>('/users', newUser).then(res => res.data),
+    onSuccess: () => {
+      // Invalidate và refetch
+      queryClient.invalidateQueries({ queryKey: ['users'] });
+    },
+  });
+
+  return (
+    <button onClick={() => mutation.mutate({ firstName: 'John', email: 'john@example.com' })}>
+      Create User
+    </button>
+  );
+}
+```
+
+---
+
+## 📄 License
+
+MIT

@@ -1,6 +1,6 @@
 import type { AxiosInstance, AxiosResponse, InternalAxiosRequestConfig } from 'axios';
 import axios from 'axios';
-import type { ApiClientConfig, ApiError, ApiResponse } from '../../types';
+import type { ApiClientConfig, ApiError, ApiResponse, ResponseContext } from '../../types';
 import { keysToCamelCase } from '../../utils/transformKeys';
 import { logger } from '../../utils/logger';
 import type { AbortManager } from '../AbortManager';
@@ -10,13 +10,14 @@ export function setupResponseInterceptors(
   config: ApiClientConfig,
   abortManager: AbortManager
 ) {
-  // ── Token Refresh State — PER INSTANCE (không phải global) ───────────────
-  // Đặt trong closure để mỗi instance có state riêng, tránh bug multi-instance
   let isRefreshing = false;
   let refreshQueue: Array<{
     resolve: (token: string) => void;
     reject: (err: unknown) => void;
   }> = [];
+  // Ensures onRefreshFailed fires exactly once per refresh cycle,
+  // even when multiple queued requests all fail after a bad refresh.
+  let refreshFailedNotified = false;
 
   function processQueue(token: string | null, error: unknown) {
     for (const { resolve, reject } of refreshQueue) {
@@ -27,19 +28,16 @@ export function setupResponseInterceptors(
   }
 
   axiosInstance.interceptors.response.use(
-    // ── Success handler ─────────────────────────────────────────────────────
-    (response: AxiosResponse): AxiosResponse => {
+    async (response: AxiosResponse): Promise<AxiosResponse> => {
       const reqConfig = response.config as InternalAxiosRequestConfig & {
         _startTime?: number;
         _abortKey?: string;
       };
 
-      // 1. Dọn dẹp AbortController
       if (reqConfig._abortKey) {
         abortManager.clear(reqConfig._abortKey);
       }
 
-      // 2. Logging
       if (config.logging !== false) {
         logger.response(
           {
@@ -52,8 +50,7 @@ export function setupResponseInterceptors(
         );
       }
 
-      // 3. Transform response keys: snake_case → camelCase
-      // Skip for non-JSON response types (blob, arraybuffer, document)
+      // Skip key transform and envelope unwrap for non-JSON response types (blob, arraybuffer).
       const skipTransform =
         response.config.responseType !== undefined &&
         response.config.responseType !== 'json';
@@ -63,11 +60,7 @@ export function setupResponseInterceptors(
         responseData = keysToCamelCase(responseData);
       }
 
-      // 4. Bóc tách envelope { data, message, status }
-      // Skip envelope unwrap cho non-JSON types (blob, arraybuffer...)
-      const skipEnvelope =
-        response.config.responseType !== undefined &&
-        response.config.responseType !== 'json';
+      const skipEnvelope = skipTransform;
 
       const isEnvelope =
         !skipEnvelope &&
@@ -84,14 +77,28 @@ export function setupResponseInterceptors(
           }
         : { data: responseData, message: 'OK', status: response.status };
 
-      // Trả về AxiosResponse với data đã được normalize thành ApiResponse
+      const afterHooks = config.hooks?.afterResponse;
+      if (afterHooks?.length && !skipEnvelope) {
+        const ctx: ResponseContext = {
+          data: normalized.data,
+          message: normalized.message,
+          status: normalized.status,
+          method: reqConfig.method ?? 'get',
+          url: reqConfig.url ?? '',
+        };
+        for (const hook of afterHooks) {
+          await hook(ctx);
+        }
+      }
+
       return { ...response, data: normalized };
     },
 
-    // ── Error handler ────────────────────────────────────────────────────────
     async (error: unknown) => {
       if (!axios.isAxiosError(error)) {
-        return Promise.reject(buildApiError(error, 0));
+        const apiError = buildApiError(error, 0);
+        await runErrorHooks(config, apiError);
+        return Promise.reject(apiError);
       }
 
       const reqConfig = error.config as
@@ -103,12 +110,10 @@ export function setupResponseInterceptors(
           })
         | undefined;
 
-      // 1. Dọn dẹp AbortController
       if (reqConfig?._abortKey) {
         abortManager.clear(reqConfig._abortKey);
       }
 
-      // 2. Logging lỗi
       if (config.logging !== false && reqConfig) {
         logger.error(
           {
@@ -121,21 +126,32 @@ export function setupResponseInterceptors(
         );
       }
 
-      // 3. Lỗi do abort — silent reject
-      if (error.code === 'ERR_CANCELED' || error.name === 'AbortError') {
+      // Axios >= 1.x sets code='ERR_CANCELED' when AbortController fires.
+      // Also check error.cause for DOMException propagation edge cases.
+      const isAbortError =
+        error.code === 'ERR_CANCELED' ||
+        (error.cause instanceof DOMException && error.cause.name === 'AbortError');
+      if (isAbortError) {
         return Promise.reject(buildApiError(error, 0, 'ABORTED'));
       }
 
-      // 4. Xử lý 401 — Token expired
+      // 401 — token expired
       if (error.response?.status === 401 && config.tokenRefresh && reqConfig) {
-        // Đã retry 401 một lần rồi nhưng vẫn fail → refresh thực sự thất bại
+        // Already retried once — the refresh itself failed.
+        // Guard with refreshFailedNotified so onRefreshFailed fires only once
+        // even when multiple queued requests all receive the same 401.
         if (reqConfig._retry) {
           processQueue(null, error);
-          config.tokenRefresh.onRefreshFailed?.();
-          return Promise.reject(buildApiError(error, 401, 'UNAUTHORIZED'));
+          if (!refreshFailedNotified) {
+            refreshFailedNotified = true;
+            config.tokenRefresh.onRefreshFailed?.();
+          }
+          const apiError = buildApiError(error, 401, 'UNAUTHORIZED');
+          await runErrorHooks(config, apiError);
+          return Promise.reject(apiError);
         }
 
-        // Đang có instance khác đang refresh → xếp vào queue, chờ token mới
+        // Another refresh is already in flight — queue this request.
         if (isRefreshing) {
           return new Promise((resolve, reject) => {
             refreshQueue.push({
@@ -151,9 +167,9 @@ export function setupResponseInterceptors(
           });
         }
 
-        // Bắt đầu refresh
         reqConfig._retry = true;
         isRefreshing = true;
+        refreshFailedNotified = false;
 
         try {
           const newToken = await config.tokenRefresh.refreshFn();
@@ -162,19 +178,26 @@ export function setupResponseInterceptors(
           return axiosInstance(reqConfig);
         } catch (refreshError) {
           processQueue(null, refreshError);
-          config.tokenRefresh.onRefreshFailed?.();
-          return Promise.reject(buildApiError(refreshError, 401, 'TOKEN_REFRESH_FAILED'));
+          if (!refreshFailedNotified) {
+            refreshFailedNotified = true;
+            config.tokenRefresh.onRefreshFailed?.();
+          }
+          const apiError = buildApiError(refreshError, 401, 'TOKEN_REFRESH_FAILED');
+          await runErrorHooks(config, apiError);
+          return Promise.reject(apiError);
         } finally {
           isRefreshing = false;
         }
       }
 
-      return Promise.reject(buildApiError(error, error.response?.status ?? 0));
+      const apiError = buildApiError(error, error.response?.status ?? 0);
+      await runErrorHooks(config, apiError);
+      return Promise.reject(apiError);
     }
   );
 }
 
-// ─── Helper ───────────────────────────────────────────────────────────────────
+// ─── Helpers ─────────────────────────────────────────────────────────────────
 
 function buildApiError(error: unknown, status: number, code?: string): ApiError {
   if (axios.isAxiosError(error)) {
@@ -191,4 +214,14 @@ function buildApiError(error: unknown, status: number, code?: string): ApiError 
     return { message: error.message, status, code, originalError: error };
   }
   return { message: String(error), status, code, originalError: error };
+}
+
+/** Runs onError hooks sequentially. A hook may throw to replace the original error. */
+async function runErrorHooks(config: ApiClientConfig, error: ApiError): Promise<void> {
+  const hooks = config.hooks?.onError;
+  if (!hooks?.length) return;
+
+  for (const hook of hooks) {
+    await hook(error);
+  }
 }

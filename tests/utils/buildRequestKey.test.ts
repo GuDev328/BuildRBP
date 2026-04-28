@@ -1,3 +1,4 @@
+// @vitest-environment jsdom
 import { describe, it, expect } from 'vitest';
 import { buildRequestKey } from '../../src/utils/buildRequestKey';
 
@@ -32,7 +33,6 @@ describe('buildRequestKey', () => {
   });
 
   it('URL có ký tự đặc biệt không gây collision', () => {
-    // URL /a:b và /a với params {b:''} không được collision
     const k1 = buildRequestKey({ method: 'get', url: '/a:b' });
     const k2 = buildRequestKey({ method: 'get', url: '/a', params: { b: '' } });
     expect(k1).not.toBe(k2);
@@ -53,5 +53,38 @@ describe('buildRequestKey', () => {
   it('URL default là empty string khi không truyền', () => {
     const key = buildRequestKey({ method: 'get' });
     expect(key).toBe(JSON.stringify(['get', '', '', '']));
+  });
+
+  // ── Binary data (FormData / Blob) — Bug #4 fix ─────────────────────────────
+
+  it('FormData: 2 requests cùng URL tạo key KHÁC NHAU — không auto-cancel nhau', () => {
+    const fd1 = new FormData();
+    const fd2 = new FormData();
+    const k1 = buildRequestKey({ method: 'post', url: '/upload', data: fd1 });
+    const k2 = buildRequestKey({ method: 'post', url: '/upload', data: fd2 });
+    // Phải khác nhau để mỗi upload có AbortController riêng
+    expect(k1).not.toBe(k2);
+  });
+
+  it('Blob: 2 requests cùng URL tạo key KHÁC NHAU', () => {
+    const b1 = new Blob(['hello']);
+    const b2 = new Blob(['world']);
+    const k1 = buildRequestKey({ method: 'post', url: '/upload', data: b1 });
+    const k2 = buildRequestKey({ method: 'post', url: '/upload', data: b2 });
+    expect(k1).not.toBe(k2);
+  });
+
+  it('FormData và JSON body cùng URL → key khác nhau', () => {
+    const fd = new FormData();
+    const k1 = buildRequestKey({ method: 'post', url: '/api', data: fd });
+    const k2 = buildRequestKey({ method: 'post', url: '/api', data: { name: 'Alice' } });
+    expect(k1).not.toBe(k2);
+  });
+
+  it('binary dataStr chứa __binary_ prefix để phân biệt', () => {
+    const fd = new FormData();
+    const key = buildRequestKey({ method: 'post', url: '/upload', data: fd });
+    const parsed = JSON.parse(key) as string[];
+    expect(parsed[3]).toMatch(/^__binary_\d+__$/);
   });
 });

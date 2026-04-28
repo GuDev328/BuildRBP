@@ -1,8 +1,6 @@
 /**
- * Mock Adapter — Intercept requests và trả về mock data
- *
- * Mock response đi qua response interceptors bình thường (normalize, envelope unwrap...)
- * để đảm bảo behavior nhất quán giữa mock và production.
+ * Mock adapter — intercepts matching requests and returns configured mock data.
+ * Mock responses pass through all response interceptors identically to real responses.
  */
 
 import axios from 'axios';
@@ -10,8 +8,58 @@ import type { AxiosInstance, AxiosRequestConfig, AxiosResponse } from 'axios';
 import type { MockHandler } from '../types';
 import { logger } from '../utils/logger';
 
-function sleep(ms: number): Promise<void> {
-  return new Promise((resolve) => setTimeout(resolve, ms));
+function sleep(ms: number, signal?: AbortSignal | null): Promise<void> {
+  return new Promise((resolve, reject) => {
+    if (signal?.aborted) {
+      reject(new DOMException('Aborted', 'AbortError'));
+      return;
+    }
+
+    const timer = setTimeout(resolve, ms);
+
+    // `once: true` auto-removes the listener after it fires.
+    signal?.addEventListener('abort', () => {
+      clearTimeout(timer);
+      reject(new DOMException('Aborted', 'AbortError'));
+    }, { once: true });
+  });
+}
+
+/** HTTP status code → status text (RFC 7231). */
+const HTTP_STATUS_TEXT: Record<number, string> = {
+  100: 'Continue',
+  101: 'Switching Protocols',
+  200: 'OK',
+  201: 'Created',
+  202: 'Accepted',
+  204: 'No Content',
+  206: 'Partial Content',
+  301: 'Moved Permanently',
+  302: 'Found',
+  304: 'Not Modified',
+  307: 'Temporary Redirect',
+  308: 'Permanent Redirect',
+  400: 'Bad Request',
+  401: 'Unauthorized',
+  403: 'Forbidden',
+  404: 'Not Found',
+  405: 'Method Not Allowed',
+  408: 'Request Timeout',
+  409: 'Conflict',
+  410: 'Gone',
+  413: 'Payload Too Large',
+  415: 'Unsupported Media Type',
+  422: 'Unprocessable Entity',
+  429: 'Too Many Requests',
+  500: 'Internal Server Error',
+  501: 'Not Implemented',
+  502: 'Bad Gateway',
+  503: 'Service Unavailable',
+  504: 'Gateway Timeout',
+};
+
+function getStatusText(status: number): string {
+  return HTTP_STATUS_TEXT[status] ?? (status < 400 ? 'Unknown' : 'Error');
 }
 
 function matchHandler(config: AxiosRequestConfig, handler: MockHandler): boolean {
@@ -20,12 +68,10 @@ function matchHandler(config: AxiosRequestConfig, handler: MockHandler): boolean
 
   const url = config.url ?? '';
   if (typeof handler.url === 'string') {
-    // Exact match
     if (url === handler.url) return true;
-    
-    // Only allow sub-path matching if handler ends with /
-    // This prevents '/user' from matching '/users' (different resources)
-    // while '/users/' will match '/users/123' (parent-child relationship)
+
+    // Sub-path matching only when the handler URL ends with `/`.
+    // Prevents `/user` from matching `/users`.
     if (handler.url.endsWith('/')) {
       return url.startsWith(handler.url);
     }
@@ -35,20 +81,17 @@ function matchHandler(config: AxiosRequestConfig, handler: MockHandler): boolean
 }
 
 /**
- * Tạo một axios adapter function trả về mock response.
- * Dùng custom adapter thay vì monkey-patch request() để mock đi qua
- * response interceptors bình thường → behavior nhất quán với production.
+ * Replaces the axios adapter with a mock implementation.
+ * Unmatched requests fall through to the original adapter (real HTTP).
  */
 export function setupMockAdapter(axiosInstance: AxiosInstance, handlers: MockHandler[]): void {
   if (!handlers.length) return;
 
-  // Lưu adapter gốc để fallthrough khi không match handler
   const originalAdapter = axiosInstance.defaults.adapter;
 
   axiosInstance.defaults.adapter = async (config: AxiosRequestConfig): Promise<AxiosResponse> => {
     const handler = handlers.find((h) => matchHandler(config, h));
 
-    // Không match → dùng adapter gốc (real HTTP)
     if (!handler) {
       if (typeof originalAdapter === 'function') {
         // eslint-disable-next-line @typescript-eslint/no-explicit-any
@@ -60,29 +103,28 @@ export function setupMockAdapter(axiosInstance: AxiosInstance, handlers: MockHan
     }
 
     if (handler.delay) {
-      await sleep(handler.delay);
+      await sleep(handler.delay, config.signal as AbortSignal | null | undefined);
     }
 
     const responseData =
       typeof handler.response === 'function' ? handler.response(config) : handler.response;
 
     const status = handler.status ?? 200;
+    const statusText = getStatusText(status);
 
     logger.warn(`[Mock] ${(config.method ?? 'GET').toUpperCase()} ${config.url} → ${status}`);
 
-    // Build AxiosResponse đúng shape để đi qua response interceptors
+    // Cast required: AxiosResponse expects InternalAxiosRequestConfig.
     const mockResponse: AxiosResponse = {
       data: responseData,
       status,
-      statusText: status < 400 ? 'OK' : 'Error',
+      statusText,
       headers: {},
-      // config cần cast vì AxiosResponse yêu cầu InternalAxiosRequestConfig
       // eslint-disable-next-line @typescript-eslint/no-explicit-any
       config: config as any,
     };
 
-    // Simulate error nếu status >= 400 — dùng AxiosError constructor thật
-    // để axios.isAxiosError() trả true và retry/response interceptors hoạt động đúng
+    // Throw AxiosError for 4xx/5xx so response interceptors handle errors consistently.
     if (status >= 400) {
       throw new axios.AxiosError(
         `Request failed with status code ${status}`,

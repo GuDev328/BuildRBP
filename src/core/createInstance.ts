@@ -1,32 +1,13 @@
-/**
- * createInstance — Factory tạo API client hoàn chỉnh
- *
- * Thứ tự setup quan trọng — Axios xử lý response interceptors NGƯỢC thứ tự đăng ký:
- *
- *  Request flow (top-down):
- *    Cache wrap → Dedup wrap → [request interceptors] → HTTP
- *
- *  Response flow (bottom-up):
- *    HTTP → [retry interceptor] → [response interceptor: normalize/401] → caller
- *
- *  Vì vậy retry phải được đăng ký SAU response interceptor
- *  để retry interceptor chạy TRƯỚC (innermost error handler).
- */
-
 import axios from 'axios';
-import type { AxiosInstance, AxiosResponse } from 'axios';
+import type { AxiosInstance } from 'axios';
 import type { ApiClient, ApiClientConfig, ApiResponse, RequestOptions } from '../types';
 import { AbortManager } from './AbortManager';
 import { setupRequestInterceptors } from './interceptors/requestInterceptors';
 import { setupResponseInterceptors } from './interceptors/responseInterceptors';
-import { setupRetryInterceptor } from '../features/retryHandler';
-import { Deduplicator } from '../features/deduplicator';
-import { ResponseCache } from '../features/cache';
 import { setupMockAdapter } from '../features/mockAdapter';
 import { uploadFile, downloadFile } from '../features/uploadDownload';
 
 export function createApiClient(clientConfig: ApiClientConfig): ApiClient {
-  // ── 1. Tạo axios instance ────────────────────────────────────────────────
   const instance: AxiosInstance = axios.create({
     baseURL: clientConfig.baseURL,
     timeout: clientConfig.timeout ?? 10_000,
@@ -37,58 +18,20 @@ export function createApiClient(clientConfig: ApiClientConfig): ApiClient {
     },
   });
 
-  // ── 2. AbortManager ───────────────────────────────────────────────────────
   const abortManager = new AbortManager();
 
-  // ── 3. Dedup & Cache wraps ────────────────────────────────────────────────
-  // Wrap order important — outermost wraps check FIRST in the request flow:
-  //   Dedup (outermost) → Cache (inner) → HTTP
-  // Deduplicator runs first to abort duplicate requests before they hit the cache.
-  const deduplicator = new Deduplicator();
-  if (clientConfig.deduplication !== false) {
-    deduplicator.wrap(instance);
-  }
-
-  const cache = new ResponseCache(clientConfig.cache);
-  if (clientConfig.cache?.enabled) {
-    cache.wrap(instance);
-  }
-
-  // ── 4. Request interceptors ───────────────────────────────────────────────
   setupRequestInterceptors(instance, clientConfig, abortManager);
 
-  // ── 5. Response interceptors (normalize + 401 handling) ──────────────────
   setupResponseInterceptors(instance, clientConfig, abortManager);
 
-  // ── 6. Retry interceptor ──────────────────────────────────────────────────
-  // PHẢI đăng ký SAU response interceptors.
-  // Axios chạy response error handlers NGƯỢC thứ tự → retry sẽ chạy TRƯỚC
-  // response interceptor, catch được lỗi gốc trước khi bị transform.
-  setupRetryInterceptor(instance, clientConfig.retry ?? {});
-
-  // ── 7. Mock Adapter ──────────────────────────────────────────────────────
-  // Dùng custom axios adapter — mock responses đi qua tất cả interceptors
-  // như response thật → behavior nhất quán giữa mock và production.
-  // Có thể setup ở bất kỳ vị trí (không phụ thuộc thứ tự).
   if (clientConfig.mocks?.length) {
     setupMockAdapter(instance, clientConfig.mocks);
   }
 
-  // ── Helpers ───────────────────────────────────────────────────────────────
-
-  /**
-   * Internal request helper — unwrap AxiosResponse để trả về ApiResponse<T>.
-   *
-   * Truyền toàn bộ config (bao gồm custom props như abortKey, skipCache...)
-   * vì các interceptors và wrappers cần đọc chúng từ config object.
-   * Response interceptor đảm bảo res.data đã là ApiResponse shape.
-   */
   function request<T>(config: RequestOptions): Promise<ApiResponse<T>> {
     // eslint-disable-next-line @typescript-eslint/no-explicit-any
     return instance.request(config as any).then((res) => res.data as ApiResponse<T>);
   }
-
-  // ── Public API ────────────────────────────────────────────────────────────
 
   const client: ApiClient = {
     instance,
@@ -129,32 +72,23 @@ export function createApiClient(clientConfig: ApiClientConfig): ApiClient {
       abortManager.abortAll();
     },
 
-    clearCache(keyOrPattern?: string | RegExp): void {
-      if (!keyOrPattern) {
-        cache.clear();
-      } else if (keyOrPattern instanceof RegExp) {
-        // RegExp: truyền thẳng vào invalidateByPattern
-        cache.invalidateByPattern(keyOrPattern);
-      } else {
-        // string URL (vd: '/users') → match URL field trong JSON cache key format:
-        //   '["get","/users","",""]'  ← URL nằm ở field thứ 2 trong JSON array
-        // Escape special regex chars trước khi build pattern
-        const escaped = keyOrPattern.replace(/[.*+?^${}()|[\]\\]/g, '\\$&');
-        cache.invalidateByPattern(new RegExp(`,"${escaped}`));
-      }
-    },
-
     fork(overrides: Partial<ApiClientConfig> = {}): ApiClient {
-      // Deep clone mutable config references to prevent shared state
       const forkedConfig: ApiClientConfig = {
         ...clientConfig,
         ...overrides,
-        // Clone nested mutable objects
         defaultHeaders: { ...clientConfig.defaultHeaders, ...overrides.defaultHeaders },
-        retry: clientConfig.retry ? { ...clientConfig.retry, ...overrides.retry } : overrides.retry,
-        cache: clientConfig.cache ? { ...clientConfig.cache, ...overrides.cache } : overrides.cache,
-        tokenRefresh: clientConfig.tokenRefresh ? { ...clientConfig.tokenRefresh } : overrides.tokenRefresh,
+        // `in` cho phép fork({ tokenRefresh: undefined }) chủ động tạo public client.
+        tokenRefresh: 'tokenRefresh' in overrides
+          ? (overrides.tokenRefresh ? { ...overrides.tokenRefresh } : undefined)
+          : (clientConfig.tokenRefresh ? { ...clientConfig.tokenRefresh } : undefined),
         mocks: overrides.mocks ?? clientConfig.mocks,
+        hooks: overrides.hooks !== undefined ? overrides.hooks : (
+          clientConfig.hooks ? {
+            beforeRequest: clientConfig.hooks.beforeRequest ? [...clientConfig.hooks.beforeRequest] : undefined,
+            afterResponse: clientConfig.hooks.afterResponse ? [...clientConfig.hooks.afterResponse] : undefined,
+            onError: clientConfig.hooks.onError ? [...clientConfig.hooks.onError] : undefined,
+          } : undefined
+        ),
       };
       return createApiClient(forkedConfig);
     },

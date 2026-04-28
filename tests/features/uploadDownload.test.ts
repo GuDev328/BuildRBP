@@ -145,7 +145,7 @@ describe('uploadDownload', () => {
       expect(capturedConfig.params).toEqual({ ref: 'test' });
     });
 
-    it('loại bỏ custom props (abortKey, skipCache, ...) trước khi pass vào axios', async () => {
+    it('loại bỏ custom props (abortKey, autoDownload, ...) trước khi pass vào axios', async () => {
       let capturedConfig: any = null;
       const instance = makeInstance(async (config) => {
         capturedConfig = config;
@@ -155,17 +155,14 @@ describe('uploadDownload', () => {
       const formData = new FormData();
       await uploadFile(instance, '/upload', formData, {
         abortKey: 'upload-1',
-        skipCache: true,
-        skipDedup: true,
-        cacheTtl: 5000,
         autoDownload: true,
         downloadFileName: 'test.txt',
       } as any);
 
       // Custom props không được pass vào config
       expect(capturedConfig.abortKey).toBeUndefined();
-      expect(capturedConfig.skipCache).toBeUndefined();
-      expect(capturedConfig.cacheTtl).toBeUndefined();
+      expect(capturedConfig.autoDownload).toBeUndefined();
+      expect(capturedConfig.downloadFileName).toBeUndefined();
     });
   });
 

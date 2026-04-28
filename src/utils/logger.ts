@@ -1,17 +1,34 @@
 /**
- * Dev logger — chỉ active khi NODE_ENV=development
- * Đo lường thời gian và log request/response theo màu sắc
+ * Dev logger.
+ * Enabled in Vite dev mode, Node development mode, or by logger.setEnabled().
+ * Defaults to disabled when the environment cannot be detected safely.
  */
 
-// Detect môi trường
-const isBrowser = typeof window !== 'undefined';
+function detectDev(): boolean {
+  try {
+    // Indirect access avoids build failures outside import.meta environments.
+    // eslint-disable-next-line @typescript-eslint/no-explicit-any
+    const meta = (import.meta as any)?.env;
+    if (meta !== undefined) {
+      return meta.DEV === true;
+    }
+  } catch {
+  }
 
-const isDev: boolean = isBrowser
-  ? window.location.hostname === 'localhost' ||
-    window.location.hostname === '127.0.0.1'
-  : // Node.js env — dùng globalThis để tránh lỗi TS
-    (globalThis as Record<string, unknown>)['process'] != null &&
-    ((globalThis as Record<string, unknown>)['process'] as { env?: { NODE_ENV?: string } })?.env?.NODE_ENV === 'development';
+  try {
+    const proc = (globalThis as Record<string, unknown>)['process'] as
+      | { env?: { NODE_ENV?: string } }
+      | undefined;
+    if (proc?.env?.NODE_ENV !== undefined) {
+      return proc.env.NODE_ENV === 'development';
+    }
+  } catch {
+  }
+
+  return false;
+}
+
+const isBrowser = typeof window !== 'undefined';
 
 function style(color: string) {
   return isBrowser ? `color: ${color}; font-weight: bold` : '';
@@ -42,7 +59,11 @@ export interface LogEntry {
 }
 
 export const logger = {
-  enabled: isDev,
+  enabled: detectDev(),
+
+  setEnabled(value: boolean): void {
+    this.enabled = value;
+  },
 
   request(entry: Omit<LogEntry, 'status' | 'error'>): number {
     if (!this.enabled) return Date.now();
